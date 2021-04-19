@@ -3,6 +3,8 @@ import cplex
 from docplex.mp.model import Model
 from datetime import datetime
 import pandas as pd
+
+from Visualization import visualize
 from data import dfs, loads
 from log import lg
 import numpy as np
@@ -24,8 +26,7 @@ def planning(facility):
     cpx.parameters.mip.limits.populate.set(50)'''
     # Sets
     time = 1
-    space_range = range(150)
-    connector_range = range(4)
+    space_range = range(300)
     vehicle_range = range(500)
     time_range = range(24)
 
@@ -33,11 +34,11 @@ def planning(facility):
     S = 2000
     N = 6
     C_plug = 250 / 365 / 20
-    C_EVSE = 4500 / 365 / 20
+    C_EVSE = 4500 / 365 / 20 + 250 / 365 / 20
     C_grid = 240 / 365 / 20
     P_EVSE = 22 * time
     P_grid = 500
-    n_s = 0.8
+    n_s = 0.3
     l_star = 800
     T_p = 15.48 / 30
     T_e = {}
@@ -59,11 +60,7 @@ def planning(facility):
     c = {}
     for k in space_range:
         c[k] = 1 + (k / 10000)
-    cc = {}
-    for i in connector_range:
-        cc[i] = 1 + (i / 10000)
     price = {}
-
     for j in vehicle_range:
         for t in time_range:
             price[j, t] = 1 + (j + t / 10000)
@@ -84,54 +81,45 @@ def planning(facility):
 
     # Variables
     x = mdl.binary_var_dict(space_range, name='x')
-    y = mdl.binary_var_matrix(connector_range, space_range, name='y')
-    h = mdl.continuous_var_cube(space_range, vehicle_range, time_range, lb=0, name=f'h{j}')
+    # h = mdl.continuous_var_cube(space_range, vehicle_range, time_range, lb=0, name=f'h{j}')
     w = mdl.binary_var_matrix(space_range, vehicle_range, name='w')
-    # e = mdl.continuous_var_cube(space_range, vehicle_range, time_range, lb=0, name='e')
+    e = mdl.continuous_var_matrix(vehicle_range, time_range, lb=0, name='e')
     p_plus = mdl.continuous_var(lb=0, name='p_plus')
     p_star = mdl.continuous_var(lb=0, name='p_star')
 
     # Constraints
 
     mdl.add_constraint(mdl.sum(x[k] for k in space_range) <= S, 'C1')
-    for k in space_range:
-        mdl.add_constraint(mdl.sum(y[i, k] for i in connector_range) <= N * x[k], 'C3')
 
     for j in vehicle_range:
-        mdl.add_constraint(mdl.sum(h[k, j, t] for k in space_range for t in range(A[j], D[j] + 1)) >=
+        mdl.add_constraint(mdl.sum(e[j, t] for t in range(A[j], D[j] + 1)) >=
                            n_s * e_d[j], 'C4')
-    '''for j in vehicle_range:
-        mdl.add_constraint(mdl.sum(h[k, j, t] for k in space_range for t in range(A[j], D[j] + 1))
-                           <= e_d[j], 'C5')'''
-
+    '''mdl.add_constraint(mdl.sum(e[j, t] for j in vehicle_range for t in range(A[j], D[j] + 1))
+                       >= mdl.sum(e_d[j] for j in vehicle_range), 'C5')
+    for j in vehicle_range:
+        mdl.add_constraint(mdl.sum(e[j, t] for t in range(A[j], D[j] + 1)) <= e_d[j], 'C4')'''
     for t in time_range:
-        mdl.add_constraint(mdl.sum(h[k, j, t] for k in space_range for j in vehicle_range) + l[t] <=
+        mdl.add_constraint(mdl.sum(e[j, t] for j in vehicle_range) + l[t] <=
                            P_grid + p_plus, 'C6')
 
-    for k in space_range:
-        for t in time_range:
-            mdl.add_constraint(mdl.sum(w[k, j] * U[j, t] for j in vehicle_range)
-                               <= mdl.sum(y[i, k] for i in connector_range), 'C10')
+    for t in time_range:
+        mdl.add_constraint(mdl.sum(w[k, j] * U[j, t] for k in space_range for j in vehicle_range)
+                           <= mdl.sum(x[k] for k in space_range), 'C10')
     for j in vehicle_range:
         mdl.add_constraint(mdl.sum(w[k, j] for k in space_range) <= 1, 'C11')
 
-    for k in space_range:
-        for j in vehicle_range:
-            for t in range(A[j], D[j] + 1):
-                mdl.add_constraint(h[k, j, t] <= w[k, j] * P_EVSE, 'C15')
+    for j in vehicle_range:
+        for t in range(A[j], D[j] + 1):
+            mdl.add_constraint(e[j, t] <= mdl.sum(w[k, j] for k in space_range) * P_EVSE, 'C15')
 
-    for k in space_range:
-        for t in time_range:
-            mdl.add_constraint(mdl.sum(h[k, j, t] for j in vehicle_range) <= P_EVSE, 'C16')
 
     for t in time_range:
-        mdl.add_constraint(mdl.sum(h[k, j, t] for k in space_range for j in vehicle_range) + l[t] - l_star
+        mdl.add_constraint(mdl.sum(e[j, t] for j in vehicle_range) + l[t] - l_star
                            <= p_star, 'C17')
 
-    mdl.minimize(mdl.sum(C_EVSE * c[k] * x[k] for k in space_range)
-                 + mdl.sum(C_plug * cc[i] * y[i, k] for k in space_range for i in connector_range) + C_grid * p_plus
+    mdl.minimize(mdl.sum(C_EVSE * c[k] * x[k] for k in space_range) + C_grid * p_plus
                  + mdl.sum(
-        (T_e[t] * price[j, t]) * h[k, j, t] for k in space_range for j in vehicle_range for t in time_range)
+        (T_e[t] * price[j, t]) * e[j, t] for j in vehicle_range for t in time_range)
                  + T_p * p_star)
     lg.error('Start_time: {}'.format(start_time))
     mdl.print_information()
@@ -144,43 +132,36 @@ def planning(facility):
         if x[k].solution_value != 0:
             lg.error(f'x_{k} = {x[k].solution_value}')
 
-    for i in connector_range:
-        for k in space_range:
-            if y[i, k].solution_value != 0:
-                lg.error(f'y_{i, k} = {y[i, k].solution_value}')
-
     for j in vehicle_range:
         for k in space_range:
             for t in time_range:
-                if h[k, j, t].solution_value != 0:
+                if e[j, t].solution_value * w[k, j].solution_value != 0:
                     lg.error(f'w_{k, j} = {w[k, j].solution_value}, '
-                             f'h_{k, j, t} = {h[k, j, t].solution_value}, '
+                             f'e_{j, t} = {e[j,t].solution_value}, '
                              f'A_{j} = {A[j]}, D_{j} = {D[j]}, '
                              f'e_{j} = {e_d[j]}')
-    v_index = pd.MultiIndex.from_product([space_range, vehicle_range, time_range],
-                                         names=['charger', 'vehicle', 'time'])
+    v_index = pd.MultiIndex.from_product([vehicle_range, time_range],
+                                         names=['vehicle', 'time'])
     v_results = pd.DataFrame(-np.random.rand(len(v_index), 5), index=v_index)
     v_results.columns = ['Energy', 'Connection', 'Arrival', 'Departure', 'Occupation']
     for j in vehicle_range:
-        for k in space_range:
-            for t in time_range:
-                v_results.loc[(k, j, t), 'Connection'] = w[k, j].solution_value
-                v_results.loc[(k, j, t), 'Energy'] = h[k, j, t].solution_value
-                v_results.loc[(k, j, t), 'Arrival'] = A[j]
-                v_results.loc[(k, j, t), 'Departure'] = D[j]
-                v_results.loc[(k, j, t), 'Occupation'] = w[k, j].solution_value * U[j, t]
+        for t in time_range:
+            # v_results.loc[(k, j, t), 'Connection'] = w[k, j].solution_value
+            v_results.loc[(j, t), 'Energy'] = e[j, t].solution_value
+            v_results.loc[(j, t), 'Arrival'] = A[j]
+            v_results.loc[(j, t), 'Departure'] = D[j]
+            v_results.loc[(j, t), 'Occupation'] = U[j, t]
     v_results.to_csv(f'vehicles{facility}.csv')
-    CS_index = pd.MultiIndex.from_product([space_range, connector_range],
-                                          names=['charger', 'plug'])
-    CS_results = pd.DataFrame(-np.random.rand(len(CS_index), 2), index=CS_index)
-    CS_results.columns = ['CS', 'Connector']
+    CS_index = pd.MultiIndex.from_product([space_range],
+                                          names=['charger'])
+    CS_results = pd.DataFrame(-np.random.rand(len(CS_index), 1), index=CS_index)
+    CS_results.columns = ['CS']
     for k in space_range:
-        for i in connector_range:
-            CS_results.loc[(k, i), 'CS'] = x[k].solution_value
-            CS_results.loc[(k, i), 'Connector'] = y[i, k].solution_value
+        CS_results.loc[k, 'CS'] = x[k].solution_value
     CS_results.to_csv(f'CS{facility}.csv')
     end_time = datetime.now()
     lg.error('Duration: {}'.format(end_time - start_time))
 
 
-planning(facility=1)
+planning(facility=0)
+visualize(0)

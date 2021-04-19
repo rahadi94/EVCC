@@ -5,7 +5,7 @@ lg.setLevel(logging.INFO)
 
 formatter = logging.Formatter('%(message)s')
 
-file_handler = logging.FileHandler('facility1.csv')
+file_handler = logging.FileHandler('facility0.csv')
 file_handler.setFormatter(formatter)
 file_handler.setLevel(logging.ERROR)
 
