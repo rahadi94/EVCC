@@ -1,45 +1,34 @@
 import random
-import cplex
 from docplex.mp.model import Model
 from datetime import datetime
 import pandas as pd
 
-from Visualization import visualize
-from data import dfs, loads
+from data import data_preparation
 from log import lg
 import numpy as np
 
 
-def planning(facility):
+def planning(facility, data):
     start_time = datetime.now()
     random.seed(2)
     mdl = Model("Charging-cluster_Management")
-    cpx = mdl.get_cplex()
-    cpx.parameters.mip.pool.relgap.set(0.1)
-    '''cpx.parameters.mip.tolerances.integrality.set(0)
-    cpx.parameters.simplex.tolerances.markowitz.set(0.999)
-    cpx.parameters.simplex.tolerances.optimality.set(1e-9)
-    cpx.parameters.simplex.tolerances.feasibility.set(1e-9)
-    cpx.parameters.mip.pool.intensity.set(2)
-    cpx.parameters.mip.pool.absgap.set(1e75)
-    cpx.parameters.mip.pool.relgap.set(1e75)
-    cpx.parameters.mip.limits.populate.set(50)'''
     # Sets
+    dfs, loads = data_preparation(facility, data)
     time = 1
-    space_range = range(300)
-    vehicle_range = range(500)
+    space_range = range(25)
+    vehicle_range = range(dfs['EntryHour'].count())
     time_range = range(24)
 
     # Parameters
     S = 2000
     N = 6
-    C_plug = 250 / 365 / 20
-    C_EVSE = 4500 / 365 / 20 + 250 / 365 / 20
-    C_grid = 240 / 365 / 20
+    C_plug = 250 / 365 / 2
+    C_EVSE = 4500 / 365 / 20 + 250 / 365 / 2
+    C_grid = 240 / 365 / 2
     P_EVSE = 22 * time
-    P_grid = 500
-    n_s = 0.3
-    l_star = 800
+    P_grid = loads.max().values[0] * 1.5
+    n_s = 1
+    l_star = loads.max().values[0]
     T_p = 15.48 / 30
     T_e = {}
     '''T = [8.1, 8.2, 8.3, 8.4, 8.5, 8.6, 8.7, 8.8, 8.9, 9, 9.1, 9.2, 9.3, 9.4, 9.5, 9.6
@@ -63,7 +52,7 @@ def planning(facility):
     price = {}
     for j in vehicle_range:
         for t in time_range:
-            price[j, t] = 1 + (j + t / 10000)
+            price[j, t] = 1 # + (j + t / 10000)
 
     e_d = {}
     A = {}
@@ -80,31 +69,26 @@ def planning(facility):
                 U[j, t] = 0
 
     # Variables
-    x = mdl.binary_var_dict(space_range, name='x')
+    # x = mdl.binary_var_dict(space_range, name='x')
     # h = mdl.continuous_var_cube(space_range, vehicle_range, time_range, lb=0, name=f'h{j}')
     w = mdl.binary_var_matrix(space_range, vehicle_range, name='w')
     e = mdl.continuous_var_matrix(vehicle_range, time_range, lb=0, name='e')
+    l = mdl.continuous_var_dict(vehicle_range, lb=0, name='l')
     p_plus = mdl.continuous_var(lb=0, name='p_plus')
     p_star = mdl.continuous_var(lb=0, name='p_star')
 
     # Constraints
 
-    mdl.add_constraint(mdl.sum(x[k] for k in space_range) <= S, 'C1')
+    for j in vehicle_range:
+        mdl.add_constraint( n_s * e_d[j] - mdl.sum(e[j, t] for t in range(A[j], D[j] + 1)) <= l[j], 'C4')
 
-    for j in vehicle_range:
-        mdl.add_constraint(mdl.sum(e[j, t] for t in range(A[j], D[j] + 1)) >=
-                           n_s * e_d[j], 'C4')
-    '''mdl.add_constraint(mdl.sum(e[j, t] for j in vehicle_range for t in range(A[j], D[j] + 1))
-                       >= mdl.sum(e_d[j] for j in vehicle_range), 'C5')
-    for j in vehicle_range:
-        mdl.add_constraint(mdl.sum(e[j, t] for t in range(A[j], D[j] + 1)) <= e_d[j], 'C4')'''
     for t in time_range:
         mdl.add_constraint(mdl.sum(e[j, t] for j in vehicle_range) + l[t] <=
                            P_grid + p_plus, 'C6')
 
     for t in time_range:
         mdl.add_constraint(mdl.sum(w[k, j] * U[j, t] for k in space_range for j in vehicle_range)
-                           <= mdl.sum(x[k] for k in space_range), 'C10')
+                           <= 25, 'C10')
     for j in vehicle_range:
         mdl.add_constraint(mdl.sum(w[k, j] for k in space_range) <= 1, 'C11')
 
@@ -112,15 +96,15 @@ def planning(facility):
         for t in range(A[j], D[j] + 1):
             mdl.add_constraint(e[j, t] <= mdl.sum(w[k, j] for k in space_range) * P_EVSE, 'C15')
 
-
     for t in time_range:
         mdl.add_constraint(mdl.sum(e[j, t] for j in vehicle_range) + l[t] - l_star
                            <= p_star, 'C17')
 
-    mdl.minimize(mdl.sum(C_EVSE * c[k] * x[k] for k in space_range) + C_grid * p_plus
-                 + mdl.sum(
-        (T_e[t] * price[j, t]) * e[j, t] for j in vehicle_range for t in time_range)
-                 + T_p * p_star)
+    c1 = C_grid * p_plus
+    c2 = mdl.sum(
+        (T_e[t]) * e[j, t] for j in vehicle_range for t in time_range) + T_p * p_star
+    l = mdl.sum(l[j] for j in vehicle_range)
+    mdl.minimize(c1 + c2 + l)
     lg.error('Start_time: {}'.format(start_time))
     mdl.print_information()
 
@@ -128,9 +112,8 @@ def planning(facility):
     lg.error(f'{mdl.report()}')
     lg.error(f'p_plus = {p_plus.solution_value}')
     lg.error(f'p_star = {p_star.solution_value}')
-    for k in space_range:
-        if x[k].solution_value != 0:
-            lg.error(f'x_{k} = {x[k].solution_value}')
+    lg.error('c1: {}'.format(c1.solution_value))
+    lg.error('c2: {}'.format(c2.solution_value))
 
     for j in vehicle_range:
         for k in space_range:
@@ -152,16 +135,18 @@ def planning(facility):
             v_results.loc[(j, t), 'Departure'] = D[j]
             v_results.loc[(j, t), 'Occupation'] = U[j, t]
     v_results.to_csv(f'vehicles{facility}.csv')
-    CS_index = pd.MultiIndex.from_product([space_range],
-                                          names=['charger'])
-    CS_results = pd.DataFrame(-np.random.rand(len(CS_index), 1), index=CS_index)
-    CS_results.columns = ['CS']
-    for k in space_range:
-        CS_results.loc[k, 'CS'] = x[k].solution_value
-    CS_results.to_csv(f'CS{facility}.csv')
+
     end_time = datetime.now()
     lg.error('Duration: {}'.format(end_time - start_time))
 
 
-planning(facility=0)
-visualize(0)
+dates = ['2019-06-03', '2019-06-04', '2019-06-05', '2019-06-06', '2019-06-07',
+         '2019-10-21', '2019-10-22', '2019-10-23', '2019-10-24', '2019-10-25']
+
+facilities = ['Facility_3', 'Facility_4', 'Facility_6']
+'''for j in ['2019-06-05', '2019-06-06', '2019-06-07',
+         '2019-10-21', '2019-10-22', '2019-10-23', '2019-10-24', '2019-10-25']:'''
+'''dates = ['2019-06-06', '2019-06-07',
+         '2019-10-21', '2019-10-22', '2019-10-23', '2019-10-24', '2019-10-25']'''
+#for i in dates:
+planning(facility='Facility_1', data='2019-06-03')
